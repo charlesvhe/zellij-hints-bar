@@ -1,0 +1,1 @@
+# zellij-hints-bar
