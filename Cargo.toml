@@ -1,0 +1,11 @@
+[package]
+name = "zellij-hints-bar"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+nu-ansi-term = "0"
+zellij-tile = "0"
+
