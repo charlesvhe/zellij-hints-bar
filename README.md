@@ -15,6 +15,7 @@ copy_command "pbcopy"
 
 plugins {
     hints-bar { path "/Users/charlesvhe/.config/zellij/zellij-hints-bar"; }
+    //hints-bar { path "/Volumes/DATA/VSCodeProjects/zellij-hints-bar/target/wasm32-wasi/debug/zellij-hints-bar"; }
 }
 
 // toggle enabling icon
@@ -22,7 +23,7 @@ simplified_ui false
 
 layout {
     pane
-    pane size= borderless=true {
+    pane size=1 borderless=true {
         plugin location="zellij:hints-bar"
     }
 }

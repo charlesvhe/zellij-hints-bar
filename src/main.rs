@@ -1,6 +1,9 @@
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+};
 
-use nu_ansi_term::{unstyle, AnsiStrings, Color, Style};
+use nu_ansi_term::{AnsiString, Color, Style};
 use zellij_tile::prelude::{actions::Action, *};
 
 #[derive(Default)]
@@ -47,6 +50,11 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, _rows: usize, cols: usize) {
+        if cols == 0 {
+            // new tab
+            return;
+        }
+        let mut line_buf = VecDeque::<AnsiString>::new();
         // 配置颜色
         let palette = self.mode_info.style.colors;
         let color_bg = match palette.bg {
@@ -67,6 +75,9 @@ impl ZellijPlugin for State {
         let color_tab = palette_color_to_color(&palette.white);
 
         // 渲染Tab
+        let mut tab_buf = VecDeque::<AnsiString>::new();
+        let mut tab_is_actived = false;
+        let max_tab_count = 5;
         for tab in &self.tabs {
             if (self.mode_info.mode == InputMode::Normal)
                 || (self.mode_info.mode == InputMode::Tab)
@@ -74,16 +85,26 @@ impl ZellijPlugin for State {
             {
                 let mut color = color_tab;
                 if tab.active {
+                    tab_is_actived = true;
                     color = color_active;
                 }
-                let as_arr = [
-                    Style::new().on(color).fg(color_bg).paint(""),
-                    Style::new().on(color).fg(color_bg).paint(&tab.name),
-                    Style::new().on(color_bg).fg(color).bold().paint(""),
-                ];
-                print!("{}", AnsiStrings(&as_arr).to_string());
+
+                tab_buf.push_back(Style::new().on(color).fg(color_bg).paint(""));
+                tab_buf.push_back(Style::new().on(color).fg(color_bg).paint(&tab.name));
+                tab_buf.push_back(Style::new().on(color_bg).fg(color).bold().paint(""));
+
+                if tab_buf.len() > max_tab_count * 3 {
+                    tab_buf.pop_front();
+                    tab_buf.pop_front();
+                    tab_buf.pop_front();
+                }
+
+                if tab_buf.len() == max_tab_count * 3 && tab_is_actived {
+                    break;
+                }
             }
         }
+        line_buf.append(&mut tab_buf);
 
         // 按action聚合快捷键 例如 Move ←↑→↓
         let mut action_keys = HashMap::<ActionInfo, RefCell<Vec<String>>>::new();
@@ -104,12 +125,12 @@ impl ZellijPlugin for State {
             }
         }
 
-        let mut vec_action_info:Vec<&ActionInfo> = action_keys.keys().collect();
+        let mut vec_action_info: Vec<&ActionInfo> = action_keys.keys().collect();
         vec_action_info.sort_by(|a, b| a.sort.cmp(&b.sort));
 
         // 渲染快捷键
         for action in vec_action_info {
-            let action_string = match self.icon{
+            let action_string = match self.icon {
                 true => &action.icon,
                 false => &action.name,
             };
@@ -124,44 +145,59 @@ impl ZellijPlugin for State {
             if let Some(k) = keys_string.strip_suffix('/') {
                 keys_string = k.to_string();
             }
-
-            let as_arr = [
-                Style::new().on(color_bg).fg(color_text).paint(" / "),
-                Style::new().on(color_bg).fg(color_active).paint("<"),
+            line_buf.push_back(Style::new().on(color_bg).fg(color_text).paint(" / "));
+            line_buf.push_back(Style::new().on(color_bg).fg(color_active).paint("<"));
+            line_buf.push_back(
                 Style::new()
                     .on(color_bg)
                     .fg(color_active)
                     .underline()
                     .paint(keys_string),
-                Style::new().on(color_bg).fg(color_active).paint(">"),
-                Style::new().on(color_bg).fg(color_text).paint(action_string),
-            ];
-            print!("{}", AnsiStrings(&as_arr).to_string());
+            );
+            line_buf.push_back(Style::new().on(color_bg).fg(color_active).paint(">"));
+            line_buf.push_back(
+                Style::new()
+                    .on(color_bg)
+                    .fg(color_text)
+                    .paint(action_string),
+            );
         }
 
+        let mut string_buf = String::new();
+        let mut left_cols = cols;
+        // 截取字符串
+        for ansi_string in line_buf {
+            let count = ansi_string.as_str().chars().count();
+            if left_cols >= count {
+                string_buf += &ansi_string.to_string();
+                left_cols -= count;
+            } else {
+                break;
+            }
+        }
+        print!("{}", string_buf);
+
         // 渲染model
-        let as_arr = [
-            Style::new().on(color_active).fg(color_bg).paint(""),
+        let string_model = mode_to_str(&self.mode_info.mode);
+        print!(
+            "\u{1b}[0;{}H{}{}{}",
+            cols - string_model.chars().count() - 1,
             Style::new()
                 .on(color_active)
                 .fg(color_bg)
-                .paint(mode_to_str(&self.mode_info.mode)),
-            Style::new().on(color_bg).fg(color_active).bold().paint(""),
-        ];
-        let ansi_strings_model = AnsiStrings(&as_arr);
-        let count_model = unstyle(&ansi_strings_model).chars().count();
-        // 创建Tab时cols为0
-        if cols > count_model {
-            print!(
-                "\u{1b}[0;{}H{}",
-                cols - count_model + 1,
-                ansi_strings_model.to_string()
-            );
-        }
+                .paint("")
+                .to_string(),
+            Style::new()
+                .on(color_active)
+                .fg(color_bg)
+                .paint(string_model),
+            Style::new().on(color_bg).fg(color_active).bold().paint("")
+        );
+        // String::from(" ").repeat(10);
     }
 }
 
-// zellij color 转 nu_ansi_term color
+// zellij color to nu_ansi_term color
 fn palette_color_to_color(palette_color: &PaletteColor) -> Color {
     match palette_color {
         PaletteColor::Rgb(rgb) => Color::Rgb(rgb.0, rgb.1, rgb.2),
@@ -188,78 +224,280 @@ fn mode_to_str(m: &InputMode) -> String {
     }
 }
 
-// action 转 字符串 icon nerdfonts.com/cheat-sheet nf-md-
+// action to name and icon nerdfonts.com/cheat-sheet nf-md-
 fn action_info(action: &Action) -> ActionInfo {
     match action {
         // shared nf-md-
-        Action::Quit => ActionInfo{name:String::from("Quit"), icon: String::from("󰩈"), sort: 1000 },
-        Action::Detach => ActionInfo{name:String::from("Detach"), icon: String::from("󱘖"), sort: 990 },
-
-        Action::SwitchToMode(m) => {
-            match m {
-                InputMode::Normal => ActionInfo{name:mode_to_str(m), icon: String::from("󰆍"), sort: 100 },
-                InputMode::Locked => ActionInfo{name:mode_to_str(m), icon: String::from("󰍁"), sort: 110 },
-                InputMode::Resize => ActionInfo{name:mode_to_str(m), icon: String::from("󰁌"), sort: 125 },
-                InputMode::Pane => ActionInfo{name:mode_to_str(m), icon: String::from("󰄱"), sort: 120 },
-                InputMode::Tab => ActionInfo{name:mode_to_str(m), icon: String::from("󰉖"), sort: 170 },
-                InputMode::Scroll => ActionInfo{name:mode_to_str(m), icon: String::from("󰒺"), sort: 140 },
-                InputMode::EnterSearch => ActionInfo{name:mode_to_str(m), icon: String::from("󱎸"), sort: 150 },
-                InputMode::Search => ActionInfo{name:mode_to_str(m), icon: String::from("󰍉"), sort: 145 },
-                InputMode::RenameTab => ActionInfo{name:mode_to_str(m), icon: String::from("󰷎"), sort: 175 },
-                InputMode::RenamePane => ActionInfo{name:mode_to_str(m), icon: String::from("󰏭"), sort: 135 },
-                InputMode::Session => ActionInfo{name:mode_to_str(m), icon: String::from(""), sort: 180 },
-                InputMode::Move => ActionInfo{name:mode_to_str(m), icon: String::from("󰁁"), sort: 130 },
-                InputMode::Prompt => ActionInfo{name:mode_to_str(m), icon: String::from("󰆅"), sort: 185 },
-                InputMode::Tmux => ActionInfo{name:mode_to_str(m), icon: String::from("󰰤"), sort: 190 },
-            }
+        Action::Quit => ActionInfo {
+            name: String::from("Quit"),
+            icon: String::from("󰩈"),
+            sort: 1000,
         },
-        Action::ToggleFloatingPanes => ActionInfo{name:String::from("Floating"), icon: String::from("󱣵"), sort: 150 },
-        Action::ToggleFocusFullscreen => ActionInfo{name:String::from("Fullscreen"), icon: String::from("󰊓"), sort: 160 },
+        Action::Detach => ActionInfo {
+            name: String::from("Detach"),
+            icon: String::from("󱘖"),
+            sort: 990,
+        },
+
+        Action::SwitchToMode(m) => match m {
+            InputMode::Normal => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰆍"),
+                sort: 100,
+            },
+            InputMode::Locked => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰍁"),
+                sort: 110,
+            },
+            InputMode::Resize => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰁌"),
+                sort: 125,
+            },
+            InputMode::Pane => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰄱"),
+                sort: 120,
+            },
+            InputMode::Tab => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰉖"),
+                sort: 170,
+            },
+            InputMode::Scroll => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰒺"),
+                sort: 140,
+            },
+            InputMode::EnterSearch => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󱎸"),
+                sort: 150,
+            },
+            InputMode::Search => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰍉"),
+                sort: 145,
+            },
+            InputMode::RenameTab => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰷎"),
+                sort: 175,
+            },
+            InputMode::RenamePane => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰏭"),
+                sort: 135,
+            },
+            InputMode::Session => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from(""),
+                sort: 180,
+            },
+            InputMode::Move => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰁁"),
+                sort: 130,
+            },
+            InputMode::Prompt => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰆅"),
+                sort: 185,
+            },
+            InputMode::Tmux => ActionInfo {
+                name: mode_to_str(m),
+                icon: String::from("󰰤"),
+                sort: 190,
+            },
+        },
+        Action::ToggleFloatingPanes => ActionInfo {
+            name: String::from("Floating"),
+            icon: String::from("󱣵"),
+            sort: 150,
+        },
+        Action::ToggleFocusFullscreen => ActionInfo {
+            name: String::from("Fullscreen"),
+            icon: String::from("󰊓"),
+            sort: 160,
+        },
         //pane
         Action::NewPane(od, _) => match od {
-            None => ActionInfo{name: String::from("New"), icon: String::from("󰜄"), sort: 100 },
-            Some(_) => ActionInfo{name: String::from("NewDirection"), icon: String::from("󰜶"), sort: 105 },
-        }
-        Action::MoveFocus(_) => ActionInfo{name:String::from("MoveFocus"), icon: String::from("󰋱"), sort: 110 },
-        Action::SwitchFocus => ActionInfo{name:String::from("Switch"), icon: String::from("󰽐"), sort: 120 },
-        Action::TogglePaneFrames => ActionInfo{name:String::from("Frames"), icon: String::from("󰃐"), sort: 140 },
-        Action::TogglePaneEmbedOrFloating => ActionInfo{name:String::from("Embed"), icon: String::from("󱥧"), sort: 170 },
-        Action::CloseFocus => ActionInfo{name:String::from("Close"), icon: String::from("󰅘"), sort: 190 },
+            None => ActionInfo {
+                name: String::from("New"),
+                icon: String::from("󰜄"),
+                sort: 100,
+            },
+            Some(_) => ActionInfo {
+                name: String::from("NewDirection"),
+                icon: String::from("󰜶"),
+                sort: 105,
+            },
+        },
+        Action::MoveFocus(_) => ActionInfo {
+            name: String::from("MoveFocus"),
+            icon: String::from("󰋱"),
+            sort: 110,
+        },
+        Action::SwitchFocus => ActionInfo {
+            name: String::from("Switch"),
+            icon: String::from("󰽐"),
+            sort: 120,
+        },
+        Action::TogglePaneFrames => ActionInfo {
+            name: String::from("Frames"),
+            icon: String::from("󰃐"),
+            sort: 140,
+        },
+        Action::TogglePaneEmbedOrFloating => ActionInfo {
+            name: String::from("Embed"),
+            icon: String::from("󱥧"),
+            sort: 170,
+        },
+        Action::CloseFocus => ActionInfo {
+            name: String::from("Close"),
+            icon: String::from("󰅘"),
+            sort: 190,
+        },
         // move
         Action::MovePane(od) => match od {
-            Some(_) => ActionInfo{name: String::from("MoveDirection"), icon: String::from("󰁁"), sort: 200 },
-            None => ActionInfo{name: String::from("Move"), icon: String::from("󰑐"), sort: 200 },
+            Some(_) => ActionInfo {
+                name: String::from("MoveDirection"),
+                icon: String::from("󰁁"),
+                sort: 200,
+            },
+            None => ActionInfo {
+                name: String::from("Move"),
+                icon: String::from("󰑐"),
+                sort: 200,
+            },
         },
-        Action::MovePaneBackwards => ActionInfo{name:String::from("Backwards"), icon: String::from("󰕍"), sort: 210 },
+        Action::MovePaneBackwards => ActionInfo {
+            name: String::from("Backwards"),
+            icon: String::from("󰕍"),
+            sort: 210,
+        },
         // resize
         Action::Resize(r, od) => match (r, od) {
-            (Resize::Increase, None) => ActionInfo{name:String::from("Increase"), icon: String::from("󰁌"), sort: 300 },
-            (Resize::Decrease, None) => ActionInfo{name:String::from("Decrease"), icon: String::from("󰁄"), sort: 310 },
-            (Resize::Increase, Some(_)) => ActionInfo{name:String::from("IncreaseDirection"), icon: String::from("󰹷"), sort: 320 },
-            (Resize::Decrease, Some(_)) => ActionInfo{name:String::from("DecreaseDirection"), icon: String::from("󰘕"), sort: 330 },
-        }
+            (Resize::Increase, None) => ActionInfo {
+                name: String::from("Increase"),
+                icon: String::from("󰁌"),
+                sort: 300,
+            },
+            (Resize::Decrease, None) => ActionInfo {
+                name: String::from("Decrease"),
+                icon: String::from("󰁄"),
+                sort: 310,
+            },
+            (Resize::Increase, Some(_)) => ActionInfo {
+                name: String::from("IncreaseDirection"),
+                icon: String::from("󰹷"),
+                sort: 320,
+            },
+            (Resize::Decrease, Some(_)) => ActionInfo {
+                name: String::from("DecreaseDirection"),
+                icon: String::from("󰘕"),
+                sort: 330,
+            },
+        },
         // tab
-        Action::ToggleTab => ActionInfo{name:String::from("Tab"), icon: String::from("󰾷"), sort: 410 },
-        Action::GoToPreviousTab => ActionInfo{name:String::from("Previous"), icon: String::from("󱃭"), sort: 420 },
-        Action::GoToNextTab => ActionInfo{name:String::from("Next"), icon: String::from("󱃩"), sort: 430 },
-        Action::GoToTab(_) => ActionInfo{name:String::from("Go#"), icon: String::from("󰴊"), sort: 440 },
-        Action::NewTab(_, _, _, _, _) => ActionInfo{name:String::from("New"), icon: String::from("󰮝"), sort: 400 },
-        Action::ToggleActiveSyncTab => ActionInfo{name:String::from("Sync"), icon: String::from("󰌹"), sort: 450 },
-        Action::CloseTab => ActionInfo{name:String::from("Close"), icon: String::from("󰮞"), sort: 490 },
+        Action::ToggleTab => ActionInfo {
+            name: String::from("Tab"),
+            icon: String::from("󰾷"),
+            sort: 410,
+        },
+        Action::GoToPreviousTab => ActionInfo {
+            name: String::from("Previous"),
+            icon: String::from("󱃭"),
+            sort: 420,
+        },
+        Action::GoToNextTab => ActionInfo {
+            name: String::from("Next"),
+            icon: String::from("󱃩"),
+            sort: 430,
+        },
+        Action::GoToTab(_) => ActionInfo {
+            name: String::from("Go#"),
+            icon: String::from("󰴊"),
+            sort: 440,
+        },
+        Action::NewTab(_, _, _, _, _) => ActionInfo {
+            name: String::from("New"),
+            icon: String::from("󰮝"),
+            sort: 400,
+        },
+        Action::ToggleActiveSyncTab => ActionInfo {
+            name: String::from("Sync"),
+            icon: String::from("󰌹"),
+            sort: 450,
+        },
+        Action::CloseTab => ActionInfo {
+            name: String::from("Close"),
+            icon: String::from("󰮞"),
+            sort: 490,
+        },
         // scroll
-        Action::EditScrollback => ActionInfo{name:String::from("Scrollback"), icon: String::from("󰕍"), sort: 500 },
-        Action::ScrollDown => ActionInfo{name:String::from("Down"), icon: String::from("󰒺"), sort: 510 },
-        Action::ScrollUp => ActionInfo{name:String::from("Up"), icon: String::from("󰒽"), sort: 520 },
-        Action::HalfPageScrollDown => ActionInfo{name:String::from("HalfPageDown"), icon: String::from("󰄼"), sort: 530 },
-        Action::HalfPageScrollUp => ActionInfo{name:String::from("HalfPageUp"), icon: String::from("󰄿"), sort: 540 },
-        Action::PageScrollDown => ActionInfo{name:String::from("PageDown"), icon: String::from("󰶹"), sort: 550 },
-        Action::PageScrollUp => ActionInfo{name:String::from("PageUp"), icon: String::from("󰶼"), sort: 560 },
+        Action::EditScrollback => ActionInfo {
+            name: String::from("Scrollback"),
+            icon: String::from("󰕍"),
+            sort: 500,
+        },
+        Action::ScrollDown => ActionInfo {
+            name: String::from("Down"),
+            icon: String::from("󰒺"),
+            sort: 510,
+        },
+        Action::ScrollUp => ActionInfo {
+            name: String::from("Up"),
+            icon: String::from("󰒽"),
+            sort: 520,
+        },
+        Action::HalfPageScrollDown => ActionInfo {
+            name: String::from("HalfPageDown"),
+            icon: String::from("󰄼"),
+            sort: 530,
+        },
+        Action::HalfPageScrollUp => ActionInfo {
+            name: String::from("HalfPageUp"),
+            icon: String::from("󰄿"),
+            sort: 540,
+        },
+        Action::PageScrollDown => ActionInfo {
+            name: String::from("PageDown"),
+            icon: String::from("󰶹"),
+            sort: 550,
+        },
+        Action::PageScrollUp => ActionInfo {
+            name: String::from("PageUp"),
+            icon: String::from("󰶼"),
+            sort: 560,
+        },
         //search
-        Action::Search(_) => ActionInfo{name:String::from("Search"), icon: String::from("󰍉"), sort: 700 },
-        Action::SearchToggleOption(_) => ActionInfo{name:String::from("Option"), icon: String::from("󱡴"), sort: 710 },
+        Action::Search(_) => ActionInfo {
+            name: String::from("Search"),
+            icon: String::from("󰍉"),
+            sort: 700,
+        },
+        Action::SearchToggleOption(_) => ActionInfo {
+            name: String::from("Option"),
+            icon: String::from("󱡴"),
+            sort: 710,
+        },
         // rename
-        Action::UndoRenameTab => ActionInfo{name:String::from("UndoRename"), icon: String::from("󰕍"), sort: 480 },
-        Action::UndoRenamePane => ActionInfo{name:String::from("UndoRename"), icon: String::from("󰕍"), sort: 180 },
-        _ => ActionInfo{name:String::from("None"), icon: String::from("󱥀"), sort: 1010 },
+        Action::UndoRenameTab => ActionInfo {
+            name: String::from("UndoRename"),
+            icon: String::from("󰕍"),
+            sort: 480,
+        },
+        Action::UndoRenamePane => ActionInfo {
+            name: String::from("UndoRename"),
+            icon: String::from("󰕍"),
+            sort: 180,
+        },
+        _ => ActionInfo {
+            name: String::from("None"),
+            icon: String::from("󱥀"),
+            sort: 1010,
+        },
     }
 }
