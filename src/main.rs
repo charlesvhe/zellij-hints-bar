@@ -1,9 +1,8 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
 };
 
-use nu_ansi_term::{AnsiString, Color, Style};
 use zellij_tile::prelude::{actions::Action, *};
 
 #[derive(Default)]
@@ -23,8 +22,9 @@ struct ActionInfo {
 register_plugin!(State);
 
 impl ZellijPlugin for State {
-    fn load(&mut self) {
-        set_selectable(false);
+    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+        // set_selectable(false);
+        request_permission(&[PermissionType::ReadApplicationState]);
         subscribe(&[EventType::ModeUpdate, EventType::TabUpdate]);
     }
 
@@ -54,57 +54,56 @@ impl ZellijPlugin for State {
             // new tab
             return;
         }
-        let mut line_buf = VecDeque::<AnsiString>::new();
-        // 配置颜色
-        let palette = self.mode_info.style.colors;
-        let color_bg = match palette.bg {
+
+        // 配置背景颜色
+        match self.mode_info.style.colors.bg {
             PaletteColor::Rgb(rgb) => {
                 print!(
                     "\u{1b}[0;0H\u{1b}[48;2;{};{};{}m\u{1b}[0K",
                     rgb.0, rgb.1, rgb.2
                 );
-                Color::Rgb(rgb.0, rgb.1, rgb.2)
             }
             PaletteColor::EightBit(fixed) => {
                 print!("\u{1b}[0;0H\u{1b}[48;5;{}m\u{1b}[0K", fixed);
-                Color::Fixed(fixed)
             }
         };
-        let color_text = palette_color_to_color(&palette.white);
-        let color_active = palette_color_to_color(&palette.green);
-        let color_tab = palette_color_to_color(&palette.white);
 
+        let mut cur_col = 0;
         // 渲染Tab
-        let mut tab_buf = VecDeque::<AnsiString>::new();
-        let mut tab_is_actived = false;
-        let max_tab_count = 5;
-        for tab in &self.tabs {
-            if (self.mode_info.mode == InputMode::Normal)
-                || (self.mode_info.mode == InputMode::Tab)
-                || tab.active
-            {
-                let mut color = color_tab;
+        if (self.mode_info.mode == InputMode::Normal)
+            || (self.mode_info.mode == InputMode::Tab)
+            || (self.mode_info.mode == InputMode::RenameTab)
+        {
+            // tab排序
+            let mut actived = false;
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for tab in &self.tabs {
                 if tab.active {
-                    tab_is_actived = true;
-                    color = color_active;
+                    actived = true;
                 }
-
-                tab_buf.push_back(Style::new().on(color).fg(color_bg).paint(""));
-                tab_buf.push_back(Style::new().on(color).fg(color_bg).paint(&tab.name));
-                tab_buf.push_back(Style::new().on(color_bg).fg(color).bold().paint(""));
-
-                if tab_buf.len() > max_tab_count * 3 {
-                    tab_buf.pop_front();
-                    tab_buf.pop_front();
-                    tab_buf.pop_front();
-                }
-
-                if tab_buf.len() == max_tab_count * 3 && tab_is_actived {
-                    break;
+                if actived {
+                    after.push(tab);
+                } else {
+                    before.push(tab);
                 }
             }
+            after.append(&mut before);
+
+            for tab in after {
+                let char_count = tab.name.chars().count() + 4;
+                if cur_col + char_count > cols {
+                    break;
+                }
+                cur_col += char_count;
+
+                let mut text = Text::new(&tab.name);
+                if tab.active {
+                    text = text.selected();
+                }
+                print_ribbon(text);
+            }
         }
-        line_buf.append(&mut tab_buf);
 
         // 按action聚合快捷键 例如 Move ←↑→↓
         let mut action_keys = HashMap::<ActionInfo, RefCell<Vec<String>>>::new();
@@ -145,63 +144,29 @@ impl ZellijPlugin for State {
             if let Some(k) = keys_string.strip_suffix('/') {
                 keys_string = k.to_string();
             }
-            line_buf.push_back(Style::new().on(color_bg).fg(color_text).paint(" / "));
-            line_buf.push_back(Style::new().on(color_bg).fg(color_active).paint("<"));
-            line_buf.push_back(
-                Style::new()
-                    .on(color_bg)
-                    .fg(color_active)
-                    .underline()
-                    .paint(keys_string),
-            );
-            line_buf.push_back(Style::new().on(color_bg).fg(color_active).paint(">"));
-            line_buf.push_back(
-                Style::new()
-                    .on(color_bg)
-                    .fg(color_text)
-                    .paint(action_string),
-            );
-        }
+            let keys = Text::new(format!(" <{}>", keys_string))
+                .color_range(0, 2..*(&keys_string.len()) + 2)
+                .selected();
 
-        let mut string_buf = String::new();
-        let mut left_cols = cols;
-        // 截取字符串
-        for ansi_string in line_buf {
-            let count = ansi_string.as_str().chars().count();
-            if left_cols >= count {
-                string_buf += &ansi_string.to_string();
-                left_cols -= count;
-            } else {
+            let char_count = keys_string.chars().count() + 3 + action_string.chars().count();
+            if cur_col + char_count > cols {
                 break;
             }
+            cur_col += char_count;
+
+            print_text(keys);
+            print_text(Text::new(action_string).selected());
         }
-        print!("{}", string_buf);
 
         // 渲染model
-        let string_model = mode_to_str(&self.mode_info.mode);
-        print!(
-            "\u{1b}[0;{}H{}{}{}",
-            cols - string_model.chars().count() - 1,
-            Style::new()
-                .on(color_active)
-                .fg(color_bg)
-                .paint("")
-                .to_string(),
-            Style::new()
-                .on(color_active)
-                .fg(color_bg)
-                .paint(string_model),
-            Style::new().on(color_bg).fg(color_active).bold().paint("")
+        let model_string = mode_to_str(&self.mode_info.mode);
+        print_ribbon_with_coordinates(
+            Text::new(&model_string).selected(),
+            cols - model_string.chars().count() - 4,
+            0,
+            None,
+            None,
         );
-        // String::from(" ").repeat(10);
-    }
-}
-
-// zellij color to nu_ansi_term color
-fn palette_color_to_color(palette_color: &PaletteColor) -> Color {
-    match palette_color {
-        PaletteColor::Rgb(rgb) => Color::Rgb(rgb.0, rgb.1, rgb.2),
-        PaletteColor::EightBit(fixed) => Color::Fixed(fixed.clone()),
     }
 }
 
@@ -340,7 +305,7 @@ fn action_info(action: &Action) -> ActionInfo {
             sort: 110,
         },
         Action::SwitchFocus => ActionInfo {
-            name: String::from("Switch"),
+            name: String::from("Panes"),
             icon: String::from("󰽐"),
             sort: 120,
         },
@@ -402,7 +367,7 @@ fn action_info(action: &Action) -> ActionInfo {
         },
         // tab
         Action::ToggleTab => ActionInfo {
-            name: String::from("Tab"),
+            name: String::from("Tabs"),
             icon: String::from("󰾷"),
             sort: 410,
         },
